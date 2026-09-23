@@ -106,6 +106,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_DEBUG_POSTFIX d)
 set(CMAKE_RELWITHDEBINFO_POSTFIX rd)
 
+# Some extra help to build rexglue-sdk on FreeBSD
+if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+    # Tracy requires base system libexecinfo
+    add_link_options("-lexecinfo")
+endif()
+
 # CMAKE_<CONFIG>_POSTFIX seeds libraries only, so without this every config of an
 # executable installs over the last one.
 function(rex_config_postfix target)

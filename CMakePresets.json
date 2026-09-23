@@ -47,9 +47,19 @@
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}"
             },
             "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Linux"
+		"type": "anyOf",
+		"conditions": [
+		    {
+			"type": "equals",
+			"lhs": "${hostSystemName}",
+			"rhs": "Linux"
+		    },
+		    {
+			"type": "equals",
+			"lhs": "${hostSystemName}",
+			"rhs": "FreeBSD"
+		    }
+		]
             }
         },
         {

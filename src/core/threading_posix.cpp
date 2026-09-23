@@ -25,7 +25,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <pthread.h>
 #include <semaphore.h>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <cstdio>
 
 #include <fcntl.h>
@@ -60,6 +60,10 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #endif
 #else
 #define REX_HAS_SIGEV_THREAD_ID 0
+#endif
+
+#if defined(__FreeBSD__)
+#include <pthread_np.h>
 #endif
 
 namespace rex::thread {
@@ -178,6 +182,8 @@ void EnableAffinityConfiguration() {}
 uint32_t current_thread_system_id() {
 #if defined(__APPLE__)
   return static_cast<uint32_t>(pthread_mach_thread_np(pthread_self()));
+#elif defined(__FreeBSD__)
+  return static_cast<uint32_t>(pthread_getthreadid_np());
 #else
   return static_cast<uint32_t>(syscall(SYS_gettid));
 #endif
@@ -758,6 +764,8 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
 #if defined(__APPLE__)
   uint32_t system_id() const { return static_cast<uint32_t>(pthread_mach_thread_np(thread_)); }
+#elif defined(__FreeBSD__)
+  uint32_t system_id() const { return static_cast<uint32_t>(pthread_getthreadid_np()); }
 #else
   uint32_t system_id() const { return static_cast<uint32_t>(thread_); }
 #endif
@@ -1053,13 +1061,23 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
 class PosixWaitHandle {
  public:
+#if defined(__FreeBSD__)
+  virtual ~PosixWaitHandle() = default;
+#else
   virtual ~PosixWaitHandle();
+#endif
   virtual PosixConditionBase& condition() = 0;
 };
 
+#ifndef __FreeBSD__
 PosixWaitHandle::~PosixWaitHandle() = default;
+#endif
 
+#if defined(__FreeBSD__)
+thread_local ::rex::thread::PosixCondition<Thread>* current_thread_condition_ = nullptr;
+#else
 thread_local PosixCondition<Thread>* current_thread_condition_ = nullptr;
+#endif
 
 bool DispatchCurrentThreadUserCallback() {
   if (!current_thread_condition_) {

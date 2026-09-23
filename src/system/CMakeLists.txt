@@ -90,6 +90,10 @@ target_link_libraries(rexruntime
         xxHash::xxhash
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    target_link_directories(rexruntime PRIVATE /usr/local/lib)
+endif()
+
 if(REXGLUE_ENABLE_TRACY)
     # TARGET_NAME is what tells install(EXPORT) this text is a target to
     # namespace. Without it the plain name survives into the installed config

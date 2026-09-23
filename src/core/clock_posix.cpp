@@ -27,7 +27,11 @@ uint64_t Clock::host_tick_frequency_platform() {
   return (uint64_t)((1000000000ull * (uint64_t)info.denom) / (uint64_t)info.numer);
 #else
   timespec res;
+#ifdef __FreeBSD__
+  int error = clock_getres(CLOCK_MONOTONIC, &res);
+#else
   int error = clock_getres(CLOCK_MONOTONIC_RAW, &res);
+#endif
   assert_zero(error);
   assert_zero(res.tv_sec);  // Sub second resolution is required.
 
@@ -45,7 +49,11 @@ uint64_t Clock::host_tick_count_platform() {
   return mach_absolute_time();
 #else
   timespec tp;
+#ifdef __FreeBSD__
+  int error = clock_gettime(CLOCK_MONOTONIC, &tp);
+#else
   int error = clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+#endif
   assert_zero(error);
 
   return tp.tv_nsec + tp.tv_sec * 1000000000ull;
