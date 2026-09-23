@@ -17,7 +17,7 @@
 
 #include <rex/exception_handler.h>
 
-#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
+#if REX_PLATFORM_LINUX || REX_PLATFORM_MAC || defined(__FreeBSD__)
 
 #include <signal.h>
 
@@ -84,6 +84,29 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   thread_context.r14 = uint64_t(mcontext->__ss.__r14);
   thread_context.r15 = uint64_t(mcontext->__ss.__r15);
   std::memcpy(thread_context.xmm_registers, &mcontext->__fs.__fpu_xmm0,
+              sizeof(thread_context.xmm_registers));
+#elif defined(__FreeBSD__)
+  thread_context.rip = uint64_t(mcontext.mc_rip);
+  thread_context.eflags = uint32_t(mcontext.mc_rflags);
+  thread_context.rax = uint64_t(mcontext.mc_rax);
+  thread_context.rcx = uint64_t(mcontext.mc_rcx);
+  thread_context.rdx = uint64_t(mcontext.mc_rdx);
+  thread_context.rbx = uint64_t(mcontext.mc_rbx);
+  thread_context.rsp = uint64_t(mcontext.mc_rsp);
+  thread_context.rbp = uint64_t(mcontext.mc_rbp);
+  thread_context.rsi = uint64_t(mcontext.mc_rsi);
+  thread_context.rdi = uint64_t(mcontext.mc_rdi);
+  thread_context.r8 = uint64_t(mcontext.mc_r8);
+  thread_context.r9 = uint64_t(mcontext.mc_r9);
+  thread_context.r10 = uint64_t(mcontext.mc_r10);
+  thread_context.r11 = uint64_t(mcontext.mc_r11);
+  thread_context.r12 = uint64_t(mcontext.mc_r12);
+  thread_context.r13 = uint64_t(mcontext.mc_r13);
+  thread_context.r14 = uint64_t(mcontext.mc_r14);
+  thread_context.r15 = uint64_t(mcontext.mc_r15);
+#include <machine/fpu.h>
+  const struct savefpu* fpu_state = reinterpret_cast<const struct savefpu*>(mcontext.mc_fpstate);
+  std::memcpy(thread_context.xmm_registers, fpu_state->sv_xmm,
               sizeof(thread_context.xmm_registers));
 #else
   thread_context.rip = uint64_t(mcontext.gregs[REG_RIP]);
@@ -185,6 +208,10 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       constexpr uint64_t kX86PageFaultErrorCodeWrite = UINT64_C(1) << 1;
 #if REX_PLATFORM_MAC
       access_violation_operation = (uint64_t(mcontext->__es.__err) & kX86PageFaultErrorCodeWrite)
+                                       ? Exception::AccessViolationOperation::kWrite
+                                       : Exception::AccessViolationOperation::kRead;
+#elif defined(__FreeBSD__)
+      access_violation_operation = (uint64_t(mcontext.mc_err) & kX86PageFaultErrorCodeWrite)
                                        ? Exception::AccessViolationOperation::kWrite
                                        : Exception::AccessViolationOperation::kRead;
 #else
@@ -329,6 +356,31 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
         modified_xmm_registers_remaining &= ~(UINT16_C(1) << modified_register_index);
         std::memcpy(reinterpret_cast<char*>(&mcontext->__fs.__fpu_xmm0) +
                         modified_register_index * sizeof(vec128_t),
+                    &thread_context.xmm_registers[modified_register_index], sizeof(vec128_t));
+      }
+#elif defined(__FreeBSD__)
+      mcontext.mc_rip = thread_context.rip;
+      mcontext.mc_rflags = thread_context.eflags;
+      uint32_t modified_register_index;
+      // The order must match the order in X64Register.
+      static const size_t kIntRegisterMap[] = {
+          offsetof(__mcontext, mc_rax), offsetof(__mcontext, mc_rcx), offsetof(__mcontext, mc_rdx), offsetof(__mcontext, mc_rbx),
+          offsetof(__mcontext, mc_rsp), offsetof(__mcontext, mc_rbp), offsetof(__mcontext, mc_rsi), offsetof(__mcontext, mc_rdi),
+          offsetof(__mcontext, mc_r8), offsetof(__mcontext, mc_r9), offsetof(__mcontext, mc_r10), offsetof(__mcontext, mc_r11),
+          offsetof(__mcontext, mc_r12), offsetof(__mcontext, mc_r13), offsetof(__mcontext, mc_r14), offsetof(__mcontext, mc_r15),
+      };
+      uint16_t modified_int_registers_remaining = ex.modified_int_registers();
+      while (rex::bit_scan_forward(modified_int_registers_remaining, &modified_register_index)) {
+        modified_int_registers_remaining &= ~(UINT16_C(1) << modified_register_index);
+        size_t offset = kIntRegisterMap[modified_register_index];
+        *reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(&mcontext) + offset) =
+            thread_context.int_registers[modified_register_index];
+      }
+      uint16_t modified_xmm_registers_remaining = ex.modified_xmm_registers();
+      while (rex::bit_scan_forward(modified_xmm_registers_remaining, &modified_register_index)) {
+        modified_xmm_registers_remaining &= ~(UINT16_C(1) << modified_register_index);
+        struct savefpu* fpu_state = reinterpret_cast<struct savefpu*>(mcontext.mc_fpstate);
+        std::memcpy(&fpu_state->sv_xmm[modified_register_index],
                     &thread_context.xmm_registers[modified_register_index], sizeof(vec128_t));
       }
 #else

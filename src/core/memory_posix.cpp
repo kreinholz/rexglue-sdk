@@ -37,7 +37,7 @@
 
 // macOS off_t is 64-bit with no *64 large-file variants; Linux keeps the
 // explicit *64 forms for legacy 32-bit off_t distributions.
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #define rex_mmap64 mmap
 #define rex_ftruncate64 ftruncate
 #else

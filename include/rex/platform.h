@@ -35,7 +35,7 @@
 #elif defined(__ANDROID__)
 #define REX_PLATFORM_ANDROID 1
 #define REX_PLATFORM_LINUX 1
-#elif defined(__gnu_linux__)
+#elif defined(__gnu_linux__) || defined(__FreeBSD__)
 #define REX_PLATFORM_GNU_LINUX 1
 #define REX_PLATFORM_LINUX 1
 #else

@@ -85,6 +85,11 @@ if(REXGLUE_USE_D3D12)
     )
 endif()
 
+# Additional includes path for FreeBSD
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    include_directories(SYSTEM /usr/local/include)
+endif()
+
 if(REXGLUE_USE_VULKAN)
     list(APPEND REXGPU_XENOS_SOURCES ${REXGPU_XENOS_SPIRV_SOURCES} ${REXGPU_XENOS_VULKAN_SOURCES})
 endif()
