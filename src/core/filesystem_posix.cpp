@@ -24,6 +24,11 @@
 #include <mach-o/dyld.h>
 #endif
 
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
+
 #include <rex/assert.h>
 #include <rex/filesystem.h>
 #include <rex/logging.h>
@@ -91,7 +96,16 @@ std::filesystem::path GetExecutablePath() {
   std::error_code ec;
   std::filesystem::path canonical_path = std::filesystem::weakly_canonical(executable_path, ec);
   return ec ? std::filesystem::path(executable_path) : canonical_path;
-#else
+#elif defined(__FreeBSD__)	// the following FreeBSD conditional was written by Gemini AI
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+  char buf[1024];
+  size_t cb = sizeof(buf);
+  
+  if (sysctl(mib, 4, buf, &cb, nullptr, 0) == 0) {
+    return std::filesystem::path(buf);
+  }
+  return {};
+#else // Linux
   char buff[FILENAME_MAX] = "";
   readlink("/proc/self/exe", buff, FILENAME_MAX);
   std::string s(buff);

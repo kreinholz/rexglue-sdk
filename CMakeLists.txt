@@ -110,6 +110,8 @@ set(CMAKE_RELWITHDEBINFO_POSTFIX rd)
 if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
     # Tracy requires base system libexecinfo
     add_link_options("-lexecinfo")
+    # libutil is needed for some FreeBSD-specific code in memory_posix.cpp
+    add_link_options("-lutil")
 endif()
 
 # CMAKE_<CONFIG>_POSTFIX seeds libraries only, so without this every config of an

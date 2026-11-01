@@ -49,21 +49,22 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 #include <rex/string.h>
 #endif
 
-#if REX_PLATFORM_LINUX
-// SIGEV_THREAD_ID in timer_create(...) is a Linux extension
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+using cpu_set_t = cpuset_t;	// create an alias that follows the Linux naming convention on FreeBSD
+#endif
+
+#if REX_PLATFORM_LINUX && !defined(__FreeBSD__)	// for graphics, we want to treat FreeBSD like Linux. Not so for
+// SIGEV_THREAD_ID in timer_create(...) is a Linux extension										threads/mmap!
 #define REX_HAS_SIGEV_THREAD_ID 1
 #ifdef __GLIBC__
 #define sigev_notify_thread_id _sigev_un._tid
 #endif
-#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
+#if defined(__GLIBC__) && __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #define gettid() syscall(SYS_gettid)
 #endif
 #else
 #define REX_HAS_SIGEV_THREAD_ID 0
-#endif
-
-#if defined(__FreeBSD__)
-#include <pthread_np.h>
 #endif
 
 namespace rex::thread {
@@ -131,7 +132,7 @@ int GetSystemSignal(SignalType num) {
       assert_unhandled_case(num);
       return SIGUSR1;
   }
-#else
+#else	// this is POSIX and should work on FreeBSD; Apple is more limited
   auto result = SIGRTMIN + static_cast<int>(num);
   assert_true(result < SIGRTMAX);
   return result;
@@ -276,7 +277,7 @@ static sem_t* RexCreateAnonymousSemaphore() {
 class PosixConditionBase {
  public:
   PosixConditionBase() {
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !defined(__FreeBSD__)
     // Use robust mutexes so waits can recover if owner thread terminates.
     pthread_mutexattr_t attr;
     if (pthread_mutexattr_init(&attr) == 0) {
@@ -296,7 +297,7 @@ class PosixConditionBase {
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
     auto predicate = [this] { return this->signaled(); };
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !defined(__FreeBSD__)
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
     int lock_result = pthread_mutex_lock(native_mutex);
     if (lock_result == EOWNERDEAD) {
@@ -350,7 +351,7 @@ class PosixConditionBase {
       locks.reserve(handles.size());
 
       for (size_t i = 0; i < handles.size(); ++i) {
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !defined(__FreeBSD__)
         auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
         int result = pthread_mutex_trylock(native_mutex);
         if (result == 0 || result == EOWNERDEAD) {
@@ -1061,23 +1062,13 @@ class PosixCondition<Thread> : public PosixConditionBase {
 
 class PosixWaitHandle {
  public:
-#if defined(__FreeBSD__)
-  virtual ~PosixWaitHandle() = default;
-#else
   virtual ~PosixWaitHandle();
-#endif
   virtual PosixConditionBase& condition() = 0;
 };
 
-#ifndef __FreeBSD__
 PosixWaitHandle::~PosixWaitHandle() = default;
-#endif
 
-#if defined(__FreeBSD__)
-thread_local ::rex::thread::PosixCondition<Thread>* current_thread_condition_ = nullptr;
-#else
 thread_local PosixCondition<Thread>* current_thread_condition_ = nullptr;
-#endif
 
 bool DispatchCurrentThreadUserCallback() {
   if (!current_thread_condition_) {

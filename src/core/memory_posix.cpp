@@ -29,6 +29,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(__FreeBSD__)
+#include <sys/param.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <libutil.h>
+#endif
+
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/memory/utils.h>
@@ -73,7 +81,7 @@ static std::string MakeShmName(const std::filesystem::path& path) {
   if (name.empty() || name[0] != '/') {
     name.insert(name.begin(), '/');
   }
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__FreeBSD__)
   if (name.size() > 30) {
     const std::size_t h = std::hash<std::string>{}(name);
     char hash_buf[24];
@@ -137,7 +145,7 @@ uint32_t ToPosixProtectFlags(PageAccess access) {
 }
 
 bool IsWritableExecutableMemorySupported() {
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__FreeBSD__)
   // macOS enforces W^X on Apple Silicon. Shared file mappings cannot be both
   // writable and executable. The code cache must use separate RW and RX views.
   return false;
@@ -147,7 +155,7 @@ bool IsWritableExecutableMemorySupported() {
 }
 
 // TODO(tomc): this needs to go somewhere else. we should utilize the platform namespace more.
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX && !defined(__FreeBSD__) // FreeBSD handles mmap more like Apple than Linux
 namespace {
 
 struct LinuxMapEntry {
@@ -237,6 +245,21 @@ static PageAccess PermsToPageAccess(const char perms[5]) {
 }  // namespace
 #endif  // REX_PLATFORM_LINUX
 
+// FreeBSD version of the above - written by Gemini AI
+#if defined(__FreeBSD__)
+static PageAccess FreeBSDPermsToPageAccess(int prot) {
+  const bool r = (prot & KVME_PROT_READ) != 0;
+  const bool w = (prot & KVME_PROT_WRITE) != 0;
+  const bool x = (prot & KVME_PROT_EXEC) != 0;
+
+  if (!r && !w && !x)
+    return PageAccess::kNoAccess;
+  if (x)
+    return w ? PageAccess::kExecuteReadWrite : PageAccess::kExecuteReadOnly;
+  return w ? PageAccess::kReadWrite : PageAccess::kReadOnly;
+}
+#endif // FreeBSD
+
 void* AllocFixed(void* base_address, size_t length, AllocationType allocation_type,
                  PageAccess access) {
   // Emulates Windows VirtualAlloc behavior:
@@ -262,7 +285,7 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
     // range uses mprotect to avoid clobbering the existing reservation. Do not
     // widen sub-host-page requests here - higher-level guest heaps must reconcile
     // all guest permissions sharing a host page first.
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__FreeBSD__)
   if (base_address != nullptr && allocation_type == AllocationType::kCommit) {
     const size_t host_page = page_size();
     const uintptr_t address = reinterpret_cast<uintptr_t>(base_address);
@@ -288,6 +311,10 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
   if (base_address) {
     flags |= MAP_FIXED_NOREPLACE;
   }
+#elif defined(__FreeBSD__)
+  if (base_address) {
+    flags |= MAP_FIXED | MAP_EXCL; 
+  }
 #else
   if (base_address) {
     flags |= MAP_FIXED;
@@ -298,7 +325,7 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
   if (result != MAP_FAILED) {
     return result;
   }
-#if defined(MAP_FIXED_NOREPLACE) && REX_PLATFORM_LINUX
+#if defined(MAP_FIXED_NOREPLACE) && REX_PLATFORM_LINUX && !defined(__FreeBSD__) // don't mmap Linux-style on BSD
   // Handle EEXIST: address already has a mapping (e.g., from prior Reserve)
   // This is the "commit on existing reservation" path
   if (errno == EEXIST && base_address &&
@@ -350,7 +377,7 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
     size_t old_region_length = 0;
     QueryProtect(base_address, old_region_length, *out_old_access);
   }
-#elif REX_PLATFORM_LINUX
+#elif REX_PLATFORM_LINUX && !defined(__FreeBSD__)	// FreeBSD doesn't handle mmap like Linux, so exclude from this
   // NOTE(tomc): we may want to look at doing this differently. it should work for now
   //             but there is a TOCTOU window between reading and changing.
   //             This really shouldn't be an issue since VirtualProtect on Windows isn't truly
@@ -360,6 +387,28 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
     LinuxMapEntry e;
     if (FindEntryForAddress(base_address, e)) {
       *out_old_access = PermsToPageAccess(e.perms);
+    }
+  }
+#elif defined(__FreeBSD__)	// the following FreeBSD conditional was written by Gemini AI
+  if (out_old_access) {
+    int cnt = 0;
+    struct kinfo_vmentry* vmentries = kinfo_getvmmap(getpid(), &cnt);
+    if (vmentries) {
+      uintptr_t target_addr = reinterpret_cast<uintptr_t>(base_address);
+      bool found = false;
+
+      for (int i = 0; i < cnt; i++) {
+        if (target_addr >= vmentries[i].kve_start && target_addr < vmentries[i].kve_end) {
+          *out_old_access = FreeBSDPermsToPageAccess(vmentries[i].kve_protection);
+          found = true;
+          break;
+        }
+      }
+      free(vmentries);
+      
+      if (!found) {
+        assert_always("Could not find the target virtual memory mapping region on FreeBSD");
+      }
     }
   }
 #endif
@@ -408,7 +457,31 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
     access_out = PageAccess::kNoAccess;
   }
   return true;
-#elif !REX_PLATFORM_LINUX
+#elif defined(__FreeBSD__)	// the following FreeBSD conditional was written by Gemini AI
+  access_out = PageAccess::kNoAccess;
+  length = 0;
+
+  int cnt = 0;
+  struct kinfo_vmentry* vmentries = kinfo_getvmmap(getpid(), &cnt);
+  if (!vmentries) {
+    return false;
+  }
+
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(base_address);
+  bool found = false;
+
+  for (int i = 0; i < cnt; i++) {
+    if (addr >= vmentries[i].kve_start && addr < vmentries[i].kve_end) {
+      length = static_cast<size_t>(vmentries[i].kve_end - addr);
+      access_out = FreeBSDPermsToPageAccess(vmentries[i].kve_protection);
+      found = true;
+      break;
+    }
+  }
+
+  free(vmentries);
+  return found;
+#elif !REX_PLATFORM_LINUX && !defined(__FreeBSD__)
   access_out = PageAccess::kNoAccess;
   length = 0;
   return false;

@@ -1574,22 +1574,24 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                                 VK_NULL_HANDLE, &swapchain_image_index);
   switch (acquire_result) {
     case VK_SUCCESS:
-    case VK_SUBOPTIMAL_KHR:
       break;
+    case VK_SUBOPTIMAL_KHR:
+      REXLOG_INFO("VulkanPresenter: Swapchain is suboptimal, forcing recreation.");
+      [[fallthrough]];
+    case VK_ERROR_OUT_OF_DATE_KHR:
+    case VK_ERROR_SURFACE_LOST_KHR:
+    case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT:
+      // On FreeBSD, treating VK_SUBOPTIMAL_KHR similarly to OUT_OF_DATE forces a 
+      // swapchain recreation, preventing presentation hangs during active emulation.
+      REXLOG_INFO(
+          "VulkanPresenter: Presentation to the swapchain image has been "
+          "dropped as the swapchain or the surface has become outdated/suboptimal");
+      return PaintResult::kNotPresentedConnectionOutdated;
     case VK_ERROR_DEVICE_LOST:
       REXLOG_ERROR(
           "VulkanPresenter: Failed to acquire the swapchain image as the "
           "device has been lost");
       return PaintResult::kGpuLostResponsible;
-    case VK_ERROR_OUT_OF_DATE_KHR:
-    case VK_ERROR_SURFACE_LOST_KHR:
-    case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT:
-      // Not an error, reporting just as info (may normally occur while resizing
-      // on some platforms).
-      REXLOG_INFO(
-          "VulkanPresenter: Presentation to the swapchain image has been "
-          "dropped as the swapchain or the surface has become outdated");
-      return PaintResult::kNotPresentedConnectionOutdated;
     default:
       REXLOG_ERROR("VulkanPresenter: Failed to acquire the swapchain image");
       return PaintResult::kNotPresented;

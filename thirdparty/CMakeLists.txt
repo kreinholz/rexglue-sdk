@@ -51,6 +51,10 @@ if(REXGLUE_USE_VULKAN)
     )
     if(APPLE)
         list(APPEND REQUIRED_SUBMODULES vulkan-loader moltenvk)
+    elseif(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+    	# FreeBSD has system vulkan-loader available, but we want to build bundled with vulkan-memory-allocator
+    	# which is not available on FreeBSD
+    	list(APPEND REQUIRED_SUBMODULES vulkan-loader)
     endif()
 endif()
 

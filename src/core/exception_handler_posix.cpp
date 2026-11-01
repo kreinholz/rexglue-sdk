@@ -31,12 +31,16 @@
 
 #include <ucontext.h>
 
+#ifdef __FreeBSD__
+#include <machine/fpu.h>
+#endif
+
 namespace rex::arch {
 
 bool signal_handlers_installed_ = false;
 struct sigaction original_sigill_handler_;
 struct sigaction original_sigsegv_handler_;
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__FreeBSD__)
 struct sigaction original_sigbus_handler_;
 #endif
 
@@ -104,11 +108,10 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   thread_context.r13 = uint64_t(mcontext.mc_r13);
   thread_context.r14 = uint64_t(mcontext.mc_r14);
   thread_context.r15 = uint64_t(mcontext.mc_r15);
-#include <machine/fpu.h>
   const struct savefpu* fpu_state = reinterpret_cast<const struct savefpu*>(mcontext.mc_fpstate);
   std::memcpy(thread_context.xmm_registers, fpu_state->sv_xmm,
               sizeof(thread_context.xmm_registers));
-#else
+#else // Linux
   thread_context.rip = uint64_t(mcontext.gregs[REG_RIP]);
   thread_context.eflags = uint32_t(mcontext.gregs[REG_EFL]);
   // The REG_ order may be different than the register indices in the
@@ -152,6 +155,17 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   thread_context.fpcr = mcontext->__ns.__fpcr;
   static_assert(sizeof(thread_context.v) == sizeof(mcontext->__ns.__v));
   std::memcpy(thread_context.v, mcontext->__ns.__v, sizeof(thread_context.v));
+#elif defined(__FreeBSD__)
+  std::memcpy(thread_context.x, mcontext.mc_gpregs.gp_x, sizeof(mcontext.mc_gpregs.gp_x));
+  thread_context.x[29] = mcontext.mc_gpregs.gp_x[29];
+  thread_context.x[30] = mcontext.mc_gpregs.gp_lr;
+  thread_context.sp    = mcontext.mc_gpregs.gp_sp;
+  thread_context.pc    = mcontext.mc_gpregs.gp_elr;
+  thread_context.pstate = mcontext.mc_gpregs.gp_spsr;
+  thread_context.fpsr = mcontext.mc_fpregs.fp_sr;
+  thread_context.fpcr = mcontext.mc_fpregs.fp_cr;
+  static_assert(sizeof(thread_context.v) == sizeof(mcontext.mc_fpregs.fp_q));
+  std::memcpy(thread_context.v, mcontext.mc_fpregs.fp_q, sizeof(thread_context.v));
 #else
   // Linux ARM64: mcontext_t is struct sigcontext (value, not pointer)
   std::memcpy(thread_context.x, mcontext.regs, sizeof(thread_context.x));
@@ -194,8 +208,8 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       // On macOS, SIGBUS (KERN_PROTECTION_FAILURE) is raised for writes to
       // read-protected pages — the same scenario that raises SIGSEGV on Linux.
       // Fall through to treat it as an access violation.
-#if !REX_PLATFORM_MAC
-      // On non-Mac POSIX, SIGBUS is a bus error (misaligned access), not a
+#if !REX_PLATFORM_MAC && !defined(__FreeBSD__)
+      // On Linux, SIGBUS is a bus error (misaligned access), not a
       // protection fault — don't handle it here.
       assert_unhandled_case(signal_number);
       return;
@@ -229,6 +243,34 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
         uint32_t mac_esr = mcontext->__es.__esr;
         if (((mac_esr >> 26) & 0b111110) == 0b100100) {
           access_violation_operation = (mac_esr & (1U << 6))
+                                           ? Exception::AccessViolationOperation::kWrite
+                                           : Exception::AccessViolationOperation::kRead;
+        } else {
+          bool instruction_is_store;
+          if (IsArm64LoadPrefetchStore(*reinterpret_cast<const uint32_t*>(thread_context.pc),
+                                       instruction_is_store)) {
+            access_violation_operation = instruction_is_store
+                                             ? Exception::AccessViolationOperation::kWrite
+                                             : Exception::AccessViolationOperation::kRead;
+          } else {
+            assert_always(
+                "No ESR in the exception thread context, or it's not a Data "
+                "Abort, and the faulting instruction is not a known load, "
+                "prefetch or store instruction");
+            access_violation_operation = Exception::AccessViolationOperation::kUnknown;
+          }
+        }
+      }
+#elif defined(__FreeBSD__)
+      {
+        uint64_t freebsd_esr = 0;
+        
+        if (mcontext.mc_flags & _MC_ESR_VALID) {
+          freebsd_esr = mcontext.mc_esr;
+        }
+
+        if (((freebsd_esr >> 26) & 0b111110) == 0b100100) {
+          access_violation_operation = (freebsd_esr & (1U << 6))
                                            ? Exception::AccessViolationOperation::kWrite
                                            : Exception::AccessViolationOperation::kRead;
         } else {
@@ -445,6 +487,32 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                       &thread_context.v[modified_register_index], sizeof(vec128_t));
         }
       }
+#elif defined(__FreeBSD__)
+      while (rex::bit_scan_forward(modified_x_registers_remaining, &modified_register_index)) {
+        modified_x_registers_remaining &= ~(UINT32_C(1) << modified_register_index);
+        if (modified_register_index < 29) {
+          mcontext.mc_gpregs.gp_x[modified_register_index] = thread_context.x[modified_register_index];
+        } else if (modified_register_index == 29) {
+          mcontext.mc_gpregs.gp_x[29] = thread_context.x[29];
+        } else {
+          mcontext.mc_gpregs.gp_lr = thread_context.x[30];
+        }
+      }
+      
+      mcontext.mc_gpregs.gp_sp   = thread_context.sp;
+      mcontext.mc_gpregs.gp_elr  = thread_context.pc;
+      mcontext.mc_gpregs.gp_spsr = thread_context.pstate;
+
+      mcontext.mc_fpregs.fp_sr   = thread_context.fpsr;
+      mcontext.mc_fpregs.fp_cr   = thread_context.fpcr;
+      {
+        uint32_t modified_v_registers_remaining = ex.modified_v_registers();
+        while (rex::bit_scan_forward(modified_v_registers_remaining, &modified_register_index)) {
+          modified_v_registers_remaining &= ~(UINT32_C(1) << modified_register_index);
+          std::memcpy(&mcontext.mc_fpregs.fp_q[modified_register_index],
+                      &thread_context.v[modified_register_index], sizeof(vec128_t));
+        }
+      }
 #else
       while (rex::bit_scan_forward(modified_x_registers_remaining, &modified_register_index)) {
         modified_x_registers_remaining &= ~(UINT32_C(1) << modified_register_index);
@@ -485,7 +553,7 @@ void ExceptionHandler::Install(Handler fn, void* data) {
     if (sigaction(SIGSEGV, &signal_handler, &original_sigsegv_handler_) != 0) {
       assert_always("Failed to install new SIGSEGV handler");
     }
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__FreeBSD__)
     if (sigaction(SIGBUS, &signal_handler, &original_sigbus_handler_) != 0) {
       assert_always("Failed to install new SIGBUS handler");
     }
@@ -530,7 +598,7 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
       if (sigaction(SIGSEGV, &original_sigsegv_handler_, NULL) != 0) {
         assert_always("Failed to restore original SIGSEGV handler");
       }
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__FreeBSD__)
       if (sigaction(SIGBUS, &original_sigbus_handler_, NULL) != 0) {
         assert_always("Failed to restore original SIGBUS handler");
       }
